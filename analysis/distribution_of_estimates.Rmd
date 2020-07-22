@@ -1,0 +1,41 @@
+---
+title: "Distribution of VerifyBamID estimates"
+author:
+  - name: Josh Weinstock
+date: "`r Sys.Date()`"
+output: 
+  distill::distill_article:
+          toc: true
+---
+
+```{r load, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library("tidyverse")
+library("cowplot")
+files = list.files("../freeze9/verifyBamID/", pattern = "selfSM$", full.names = TRUE)
+df = purrr::map_dfr(files, ~{
+    read_tsv(.x, col_types = cols()) %>%
+        dplyr::mutate(RNASEQ_ID = stringr::str_replace(basename(.x), ".selfSM", ""))
+})
+```
+## Histograms and scatterplot of FREEMIX and CHIPMIX
+
+```{r}
+theme_set(theme_cowplot(font_size = 15))
+ggplot(df, aes(x = FREEMIX)) +
+    geom_histogram()
+
+ggplot(df, aes(x = CHIPMIX)) +
+    geom_histogram()
+
+ggplot(df, aes(x = CHIPMIX, y = FREEMIX)) +
+    geom_point()
+```
+
+## Raw data
+
+```{r}
+df %>%
+    dplyr::select(RNASEQ_ID, NWD_ID = CHIP_ID, FREEMIX, CHIPMIX) %>%
+    DT::datatable(.)
+```
