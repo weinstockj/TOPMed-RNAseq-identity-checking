@@ -1,6 +1,7 @@
 ################################################################################
 # Author: Josh Weinstock <jweinstk@umich.edu>, Hyun Min Kang <hmkang@umich.edu>
 # Sample identity checking in TOPMed RNA-seq
+# Last updated 7/22/2020
 ################################################################################
 
 import os
@@ -8,10 +9,14 @@ import pandas as pd
 
 ########### Change these parameters to alter input sample list, output name, or name of freeze #######
 # expects two columns (without headers) - the first with sample name, second absolute path
-manifest_file = "/net/topmed8/working/call_sets/rnaseqQC/metadata/broad_uw_bamlist.rand100.index"
+# manifest_file = "/net/topmed8/working/call_sets/rnaseqQC/metadata/broad_uw_bamlist.rand100.index"
+manifest_file = "/net/topmed8/working/call_sets/rnaseqQC/metadata/broad_uw_bamlist.index"
 match_output_filename = "match.rand100.out"
 sample_freeze_summary="/net/topmed8/working/call_sets/freeze9/release/summary/topmed/samples/freeze.9.chr22.pass_and_fail.gtonly.minDP0.sample_summary"
 freeze = "freeze9"
+
+# whi only samples
+whi_file = "/net/topmed2/working/jweinstk/identity_checking_rnaseq/nhlbi.6607.WHI.rna.seq.samples.TOR"
 #####################################################################################################
 
 ########## Binaries and data files required by the pipeline ########
@@ -29,9 +34,13 @@ coding_exons = "/net/1000g/hmkang/data/gencode/gtfs/gencode.v34.annotation.gtf.c
 
 fasta = "/net/topmed8/working/call_sets/rnaseqQC/ref/Homo_sapiens_assembly38_noALT_noHLA_noDecoy_ERCC.fasta"
 
-vcf_match = "/net/fantasia/home/hmkang/tools/apigenome.master/bin/vcf-match-sparse-offsets"
+# vcf_match = "/net/fantasia/home/hmkang/tools/apigenome.master/bin/vcf-match-sparse-offsets"
+vt_sample = "/net/fantasia/home/hmkang/tools/apigenome.master/bin/vcf-gt-vt-sample"
 
 verifyBamID = "/net/fantasia/home/hmkang/code/working/verifyBamID/bin/verifyBamID"
+
+cramore = "/net/fantasia/home/hmkang/code/working/cramore/bin/cramore"
+htslib = "/net/fantasia/home/hmkang/code/working/htslib"
 ######################################################
 
 sample_manifest = pd.read_table(manifest_file, header = None, names = ['sample_id', 'path'])
@@ -39,14 +48,23 @@ sample_ids = sample_manifest.sample_id.values
 paths = sample_manifest.path.values
 print(f"running on {len(paths)} samples")
 
+whi_sample_ids = []
+with open(whi_file, "r") as f:
+    for line in f:
+        whi_sample_ids.append(line.strip())
+
 ###### Directory names ################################
 rare_subset_dir = os.path.join(freeze, "rare_variant_subset")
 rare_subset_exons_dir = os.path.join(freeze, "rare_variant_subset_exons")
 common_subset_dir = os.path.join(freeze, "common_variant_subset")
 common_subset_exons_dir = os.path.join(freeze, "common_variant_subset_exons")
 vt_dir = os.path.join(freeze, "vt")
+vt_gt_dir = os.path.join(freeze, "vt_gt")
+cohort_vt_gt_dir = os.path.join(freeze, "cohort_vt_gt")
 log_dir = os.path.join(freeze, "logs")
 match_dir = os.path.join(freeze, "match")
+ibs_matrix_dir = os.path.join(freeze, "ibs_matrix")
+ibs_matrix_head_dir = os.path.join(freeze, "ibs_matrix_head")
 verify_dir = os.path.join(freeze, "verifyBamID")
 #######################################################
 
@@ -55,8 +73,13 @@ rule all:
         os.path.join(rare_subset_exons_dir, "freeze.9.autosomes.pass.gtonly.minDP0.maxac200.offsets.exons.bcf"),
         os.path.join(common_subset_exons_dir, "freeze.9.autosomes.pass.gtonly.minDP0.minmaf05.exons.bcf"),
         expand(os.path.join(vt_dir, "{sample_id}.bcf"), sample_id = sample_ids),
-        os.path.join(match_dir, match_output_filename),
-        expand(os.path.join(verify_dir, "{sample_id}.selfSM"), sample_id = sample_ids)
+        expand(os.path.join(vt_gt_dir, "{sample_id}.gt.bcf"), sample_id = sample_ids),
+        expand(os.path.join(vt_gt_dir, "{sample_id}.gt.bcf.csi"), sample_id = sample_ids),
+        expand(os.path.join(ibs_matrix_dir, "{sample_id}.txt.gz"), sample_id = sample_ids),
+        expand(os.path.join(ibs_matrix_head_dir, "{sample_id}.head.txt"), sample_id = sample_ids),
+        os.path.join(cohort_vt_gt_dir, "whi.rnaseq.gt.bcf")
+        # os.path.join(match_dir, match_output_filename),
+        # expand(os.path.join(verify_dir, "{sample_id}.selfSM"), sample_id = sample_ids)
 
 rule subset_to_rare:
     input:
@@ -150,7 +173,7 @@ rule vt:
         {samtools_binary} view -uh -T {fasta} {params.path} 2>{log.samtools} | {vt_binary} discover2 -z -q 20 -b + -r {fasta} -s {wildcards.sample_id} -o {output} 2>{log.vt}
         """
         
-rule best_match:
+rule best_match_with_rare_variants:
     input:
         rare_bcf = os.path.join(rare_subset_exons_dir, "freeze.9.autosomes.pass.gtonly.minDP0.maxac200.offsets.exons.bcf"),
         vt = expand(os.path.join(vt_dir, "{sample_id}.bcf"), sample_id = sample_ids)
@@ -162,6 +185,63 @@ rule best_match:
         cat {sample_freeze_summary} | cut -f1 | tail -n+2 > {output.sample_ids}
         echo {input.vt} | tr ' ' '\n' | sort > bcfs_to_match.txt
         {vcf_match} --list bcfs_to_match.txt --id {output.sample_ids} --offset {input.rare_bcf} --out {output.match}
+        """
+
+rule vt_genotype:
+    input:
+        os.path.join(vt_dir, "{sample_id}.bcf")
+    output:
+        vt = os.path.join(vt_gt_dir, "{sample_id}.gt.bcf")
+    shell:
+        """
+        {vt_sample} --bcf {input} --out {output} --bed {coding_exons}
+        """
+
+rule vt_genotype_index:
+    input:
+        os.path.join(vt_gt_dir, "{sample_id}.gt.bcf")
+    output:
+        os.path.join(vt_gt_dir, "{sample_id}.gt.bcf.csi")
+    shell:
+        """
+            bcftools index {input}
+        """
+
+rule merge_vt_genotype_whi:
+    input:
+        bcf = expand(os.path.join(vt_gt_dir, "{sample_id}.gt.bcf"), sample_id = whi_sample_ids),
+        csi = expand(os.path.join(vt_gt_dir, "{sample_id}.gt.bcf.csi"), sample_id = sample_ids)
+    output:
+        os.path.join(cohort_vt_gt_dir, "whi.rnaseq.gt.bcf")
+    shell:
+        """
+            bcftools merge -Ob -o {output} {input.bcf}
+            bcftools index {output}
+        """
+
+rule best_match_with_common_variants:
+    input:
+        vcf = os.path.join(common_subset_exons_dir, "freeze.9.autosomes.pass.gtonly.minDP0.minmaf05.exons.vcf.gz"),
+        vt = os.path.join(vt_gt_dir, "{sample_id}.gt.bcf")
+    output:
+        os.path.join(ibs_matrix_dir, "{sample_id}.txt.gz")
+    shell:
+        """
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:{htslib}
+        {cramore} vcf-ibs-matrix --vcf {input.vt} --panel {input.vcf} --out {output}
+        """
+
+rule ibs_matrix_head:
+    input:
+        os.path.join(ibs_matrix_dir, "{sample_id}.txt.gz")
+    output:
+        os.path.join(ibs_matrix_head_dir, "{sample_id}.head.txt")
+    shell:
+        """
+        set +o pipefail
+        set +u
+        zcat {input} | head -n1 > {output}
+        zcat {input} | tail -n+2 | sort -g -k 12 -r | head -n 20 >> {output}
         """
         
 rule verifyBamID:
